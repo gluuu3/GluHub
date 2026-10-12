@@ -218,6 +218,23 @@ local function tween(inst, props, t, style, dir)
 	tw:Play()
 	return tw
 end
+-- iOS style press: a quick squeeze, a soft glass flash and a spring back. one tiny frame per press,
+-- removed as soon as it faded, so it costs nothing while idle
+local function press(host, radius, strength)
+	if not host or not host.Parent then return end
+	local sc = host:FindFirstChild("PressScale")
+	if not sc then sc = new("UIScale", { Name = "PressScale" }, host) end
+	sc.Scale = 1 - (strength or 0.03)
+	tween(sc, { Scale = 1 }, 0.42, Enum.EasingStyle.Back)
+	local fl = new("Frame", {
+		Name = "Flash", Size = UDim2.fromScale(1, 1), BackgroundColor3 = rgb(255, 255, 255),
+		BackgroundTransparency = 0.86, BorderSizePixel = 0, ZIndex = host.ZIndex + 1, Active = false,
+	}, host)
+	new("UICorner", { CornerRadius = UDim.new(0, radius or 10) }, fl)
+	local tw = tween(fl, { BackgroundTransparency = 1 }, 0.5, Enum.EasingStyle.Quint)
+	tw.Completed:Connect(function() fl:Destroy() end)
+	task.delay(0.8, function() if fl.Parent then fl:Destroy() end end)
+end
 local function text(parent, str, size, spec, font, props)
 	local lbl = new("TextLabel", {
 		BackgroundTransparency = 1,
@@ -925,7 +942,10 @@ local function glassify(frame, radius, sweep, plain)
 		}),
 	}, sheen)
 	if sweep ~= false then
-		tween(g, { Offset = Vector2.new(1.2, 0) }, 0.9, Enum.EasingStyle.Quint)
+		-- the sheen is a full size overlay: drop it as soon as the sweep is over so it never costs a frame
+		local tw = tween(g, { Offset = Vector2.new(1.2, 0) }, 0.9, Enum.EasingStyle.Quint)
+		tw.Completed:Connect(function() sheen:Destroy() end)
+		task.delay(1.4, function() if sheen.Parent then sheen:Destroy() end end)
 	end
 	return sheen
 end
@@ -945,8 +965,11 @@ function Popup.open(frame, onClose)
 	frame.ZIndex = 2
 	frame.Parent = PopupLayer
 	glassify(frame, sheetMode() and 22 or 16)
-	local pop = new("UIScale", { Scale = 0.9 }, frame)
-	tween(pop, { Scale = 1 }, 0.32, Enum.EasingStyle.Back)
+	local pop = new("UIScale", { Scale = 0.92 }, frame)
+	tween(pop, { Scale = 1 }, 0.36, Enum.EasingStyle.Quint)
+	local rest = frame.BackgroundTransparency
+	frame.BackgroundTransparency = 1
+	tween(frame, { BackgroundTransparency = rest }, 0.22, Enum.EasingStyle.Quint)
 	Popup.Current = { frame = frame, onClose = onClose }
 	Catcher.BackgroundTransparency = sheetMode() and 0.5 or 1
 	PopupLayer.Visible = true
@@ -1471,24 +1494,25 @@ function Container:Toggle(cfg)
 	}, track)
 	themed(knob, { BackgroundColor3 = "Text" })
 	corner(knob, knobSize / 2)
-	local markSize = math.floor(knobSize * 0.62)
-	local markOn = icon(knob, "check", markSize, "Window")
-	local markOff = icon(knob, "minus", markSize, "Window")
-	for _, m in ipairs({ markOn, markOff }) do
-		m.Frame.AnchorPoint = Vector2.new(0.5, 0.5)
-		m.Frame.Position = UDim2.fromScale(0.5, 0.5)
-	end
+	-- no icons on the knob (they were ~10 instances per toggle): a plain knob that stretches while it
+	-- slides, like the iOS switch
 	local ON_TRACK = { "Accent", function(c) return c:Lerp(UI.Theme.Window, 0.3) end }
+	local stretch = math.floor(knobSize * 0.38)
 	local function paint(animate)
 		local on = item.Value
 		local spec = on and ON_TRACK or "Line"
 		local goalPos = on and UDim2.new(1, -(knobSize + 2), 0.5, 0) or UDim2.new(0, 2, 0.5, 0)
-		markOn.Frame.Visible = on
-		markOff.Frame.Visible = not on
 		if animate then
-			tween(track, { BackgroundColor3 = resolve(spec) }, 0.14)
-			tween(knob, { Position = goalPos }, 0.16, Enum.EasingStyle.Back)
-			task.delay(0.2, function()
+			tween(track, { BackgroundColor3 = resolve(spec) }, 0.28, Enum.EasingStyle.Quint)
+			-- stretch toward the travel direction first, then settle with a small spring
+			knob.Size = UDim2.fromOffset(knobSize + stretch, knobSize)
+			if on then
+				knob.Position = UDim2.new(0, 2, 0.5, 0)
+			else
+				knob.Position = UDim2.new(1, -(knobSize + stretch + 2), 0.5, 0)
+			end
+			tween(knob, { Position = goalPos, Size = UDim2.fromOffset(knobSize, knobSize) }, 0.42, Enum.EasingStyle.Back)
+			task.delay(0.32, function()
 				themed(track, { BackgroundColor3 = item.Value and ON_TRACK or "Line" })
 			end)
 		else
@@ -1508,7 +1532,10 @@ function Container:Toggle(cfg)
 	end
 	function item:SetValue(v) self:Set(v) end
 	function item:GetValue() return self.Value end
-	row.Activated:Connect(function() item:Set(not item.Value) end)
+	row.Activated:Connect(function()
+		press(row, 10, 0.02)
+		item:Set(not item.Value)
+	end)
 	function item:Settings()
 		if item.Panel then return item.Panel end
 		local gsize = TOUCH and 32 or 24
@@ -1626,8 +1653,9 @@ function Container:Slider(cfg)
 	}, row)
 	local function render()
 		local alpha = (item.Value - min) / (max - min)
-		fill.Size = UDim2.fromScale(alpha, 1)
-		thumb.Position = UDim2.fromScale(alpha, 0.5)
+		-- a very short tween: still tracks the finger, but moves like liquid instead of stepping
+		tween(fill, { Size = UDim2.fromScale(alpha, 1) }, 0.09, Enum.EasingStyle.Quad)
+		tween(thumb, { Position = UDim2.fromScale(alpha, 0.5) }, 0.09, Enum.EasingStyle.Quad)
 		if not box:IsFocused() then box.Text = string.format("%." .. dec .. "f", item.Value) .. suffix end
 	end
 	render()
@@ -1862,6 +1890,7 @@ function Container:Dropdown(cfg)
 				btn.MouseLeave:Connect(function() paintRow(name, rec) end)
 			end
 			btn.Activated:Connect(function()
+				press(btn, 10, 0.025)
 				if multi then
 					if item.Selected[name] then
 						item.Selected[name] = nil
@@ -1939,6 +1968,7 @@ function Container:Dropdown(cfg)
 		end)
 	end
 	field.Activated:Connect(function()
+		press(field, 12, 0.02)
 		if Popup.Current then Popup.close() else open() end
 	end)
 	return item
@@ -2052,8 +2082,9 @@ function Container:Button(cfg)
 	end
 	attachTip(btn, cfg.Tooltip)
 	btn.Activated:Connect(function()
-		btn.BackgroundColor3 = UI.Theme.Accent
-		tween(btn, { BackgroundColor3 = UI.Theme.Card }, 0.3)
+		press(btn, 10, 0.04)
+		btn.BackgroundColor3 = UI.Theme.Card:Lerp(UI.Theme.Accent, 0.5)
+		tween(btn, { BackgroundColor3 = UI.Theme.Card }, 0.45, Enum.EasingStyle.Quint)
 		safe(cfg.Callback)
 	end)
 	local item = { Instance = btn }
@@ -2464,15 +2495,18 @@ function Window:SetOpen(state)
 	Tip.Frame.Visible = false
 	if state then
 		self.Root.Visible = true
-		self.Veil.BackgroundTransparency = 0
-		local p = self.Root.Position
-		self.Root.Position = p + UDim2.fromOffset(0, 14)
-		tween(self.Veil, { BackgroundTransparency = 1 }, 0.35, Enum.EasingStyle.Quint)
-		tween(self.Root, { Position = p }, 0.38, Enum.EasingStyle.Back)
+		self.Veil.BackgroundTransparency = 0.35
+		self.BodyScale.Scale = 0.93
+		tween(self.Veil, { BackgroundTransparency = 1 }, 0.3, Enum.EasingStyle.Quint)
+		tween(self.BodyScale, { Scale = 1 }, 0.5, Enum.EasingStyle.Quint)
 	else
-		tween(self.Veil, { BackgroundTransparency = 0 }, 0.12)
-		task.delay(0.13, function()
-			if not self.IsOpen then self.Root.Visible = false end
+		tween(self.Veil, { BackgroundTransparency = 0 }, 0.16, Enum.EasingStyle.Quad)
+		tween(self.BodyScale, { Scale = 0.95 }, 0.2, Enum.EasingStyle.Quad)
+		task.delay(0.2, function()
+			if not self.IsOpen then
+				self.Root.Visible = false
+				self.BodyScale.Scale = 1
+			end
 		end)
 	end
 	return true
@@ -2619,7 +2653,10 @@ function Window:_group(name)
 		gi.SetColor(open and "Text" or "Muted")
 		themed(gl, { TextColor3 = open and "Text" or "Muted" })
 	end
-	head.Activated:Connect(function() g.set(not g.Open) end)
+	head.Activated:Connect(function()
+		press(head, 14, 0.01)
+		g.set(not g.Open)
+	end)
 	if not TOUCH then
 		head.MouseEnter:Connect(function() if not g.Open then gl.TextTransparency = 0.25 end end)
 		head.MouseLeave:Connect(function() gl.TextTransparency = 0 end)
@@ -2656,6 +2693,7 @@ function Window:_layout()
 	self.SearchRow.Position = UDim2.fromOffset(0, headH)
 	local top = headH + searchH
 	local min = self.Minimized
+	if self.BarGlow and (not compact or min) then self.BarGlow.Visible = false end
 	self.Rail.Visible = (not compact) and not min
 	self.Bar.Visible = compact and not min
 	self.Content.Visible = not min
@@ -2733,6 +2771,30 @@ function Window:_dock(page)
 	page:Paint()
 end
 
+-- glide the capsule under a tab of the bottom bar (compact layout only)
+function Window:_slideGlow(btn)
+	local glow, bar = self.BarGlow, self.Bar
+	if not glow or not bar or not btn then return end
+	if not self.Compact or not btn.Parent or btn.Parent ~= self.BarList then
+		glow.Visible = false
+		return
+	end
+	task.delay(0.03, function()
+		if not btn.Parent or self.Active == nil or self.Active.Button ~= btn then return end
+		local x = btn.AbsolutePosition.X - bar.AbsolutePosition.X
+		local w = btn.AbsoluteSize.X
+		local s = self:_scale()
+		x, w = x / s, w / s
+		if not glow.Visible then
+			glow.Position = UDim2.fromOffset(x + 4, 6)
+			glow.Size = UDim2.fromOffset(w - 8, BAR_H - 12)
+			glow.Visible = true
+		else
+			tween(glow, { Position = UDim2.fromOffset(x + 4, 6), Size = UDim2.fromOffset(w - 8, BAR_H - 12) }, 0.42, Enum.EasingStyle.Quint)
+		end
+	end)
+end
+
 function Window:FocusSearch()
 	if self.Compact then
 		self.SearchOpen = true
@@ -2783,6 +2845,7 @@ function Window:_buildPills(page)
 			themed(lb, { TextColor3 = on and "Text" or "Muted" })
 		end
 		b.Activated:Connect(function()
+			press(b, 17, 0.05)
 			page.ActivePill = sec
 			page:ApplyPill()
 			page.Scroll.CanvasPosition = Vector2.new(0, 0)
@@ -2855,6 +2918,7 @@ function Window:Page(cfg)
 		dot.Visible = on and not compact
 		topline.Visible = on and compact
 		tween(topline, { Size = UDim2.fromOffset(on and 28 or 0, 2) }, 0.16)
+		if on then win:_slideGlow(btn) end
 	end
 	if not TOUCH then
 		btn.MouseEnter:Connect(function() hover = true page:Paint() end)
@@ -2930,7 +2994,10 @@ function Window:Page(cfg)
 		end
 		saveState()
 	end
-	btn.Activated:Connect(function() page:Turn() end)
+	btn.Activated:Connect(function()
+		press(btn, 10, 0.04)
+		page:Turn()
+	end)
 
 	function page:Section(scfg)
 		scfg = scfg or {}
@@ -3054,9 +3121,13 @@ function UI:Window(cfg)
 		corner(shade, 18 + grow)
 	end
 	local body = new("Frame", {
-		Name = "Body", Size = UDim2.fromScale(1, 1), BorderSizePixel = 0, ZIndex = 1, BackgroundTransparency = 1,
+		Name = "Body", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromScale(1, 1), BorderSizePixel = 0, ZIndex = 1, BackgroundTransparency = 1,
 	}, root)
 	win.Body = body
+	-- the open / close animation scales the body from its centre (never touches the root position, so
+	-- dragging and the saved position stay exact)
+	win.BodyScale = new("UIScale", { Name = "OpenScale", Scale = 1 }, body)
 	local bg = new("Frame", { Name = "Bg", Size = UDim2.fromScale(1, 1), BorderSizePixel = 0 }, body)
 	themed(bg, { BackgroundColor3 = "Window" })
 	corner(bg, 18)
@@ -3277,7 +3348,10 @@ function UI:Window(cfg)
 				i.SetColor("Muted")
 			end)
 		end
-		b.Activated:Connect(onClick)
+		b.Activated:Connect(function()
+			press(b, size / 2, 0.08)
+			onClick()
+		end)
 		attachTip(b, tip)
 		return b, i
 	end
@@ -3350,6 +3424,15 @@ function UI:Window(cfg)
 	win.Bar = bar
 	local barLine = new("Frame", { Size = UDim2.new(1, 0, 0, 1), BorderSizePixel = 0 }, bar)
 	themed(barLine, { BackgroundColor3 = "Line" })
+	-- liquid capsule behind the active tab: one frame that glides from tab to tab
+	local barGlow = new("Frame", {
+		Name = "Glow", BackgroundTransparency = 0.84, BorderSizePixel = 0, Visible = false, ZIndex = 1,
+		Position = UDim2.fromOffset(8, 6), Size = UDim2.fromOffset(40, BAR_H - 12),
+	}, bar)
+	themed(barGlow, { BackgroundColor3 = "Text" })
+	corner(barGlow, 16)
+	stroke(barGlow, "Text", 1, 0.8)
+	win.BarGlow = barGlow
 	win.BarList = new("ScrollingFrame", {
 		BackgroundTransparency = 1, BorderSizePixel = 0, Position = UDim2.fromOffset(0, 1), Size = UDim2.new(1, 0, 1, -1),
 		ScrollBarThickness = 0, CanvasSize = UDim2.fromOffset(0, 0), AutomaticCanvasSize = Enum.AutomaticSize.X,
@@ -3465,7 +3548,10 @@ function UI:Window(cfg)
 		conn(UserInputService.InputEnded, function(input)
 			if down and isPress(input) then
 				down = false
-				if not moved then win:Toggle() end
+				if not moved then
+					press(mb, 24, 0.12)
+					win:Toggle()
+				end
 			end
 		end)
 	end
@@ -3488,10 +3574,9 @@ function UI:Window(cfg)
 	win.Veil = veil
 	bg.BackgroundTransparency = 0.04
 	glassify(bg, 18, true, true)
-	local p0 = root.Position
-	root.Position = p0 + UDim2.fromOffset(0, 18)
-	tween(veil, { BackgroundTransparency = 1 }, 0.5, Enum.EasingStyle.Quint)
-	tween(root, { Position = p0 }, 0.5, Enum.EasingStyle.Back)
+	win.BodyScale.Scale = 0.9
+	tween(veil, { BackgroundTransparency = 1 }, 0.6, Enum.EasingStyle.Quint)
+	tween(win.BodyScale, { Scale = 1 }, 0.65, Enum.EasingStyle.Quint)
 	return win
 end
 
